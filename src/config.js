@@ -45,3 +45,23 @@ export const auth = {
   },
 
 };
+
+export const twilio = {
+  accountSid: 'AC50a96cd8016f7f94a3115c3d60ad5b06',
+
+  authToken: '3caa9e25afafdcccb2bfcb16d6608be2',
+
+  UPDATE_TIME_PERIORD: 60 * 60 * 4 * 1000,
+};
+
+export const CORS_WHITELIST = [
+  'http://instant-io.herokuapp.com',
+  'https://instant-io.herokuapp.com',
+  'http://instant.rom1504.fr',
+  'https://instant.rom1504.fr',
+  'http://whiteboard.webtorrent.io',
+  'http://file.pizza',
+  'https://file.pizza',
+  'http://webtorrent.io',
+  'https://webtorrent.io',
+];

@@ -10,6 +10,7 @@
 import 'babel-polyfill';
 import path from 'path';
 import express from 'express';
+import cors from 'cors';
 import cookieParser from 'cookie-parser';
 import bodyParser from 'body-parser';
 import expressJwt from 'express-jwt';
@@ -18,12 +19,23 @@ import jwt from 'jsonwebtoken';
 import ReactDOM from 'react-dom/server';
 import UniversalRouter from 'universal-router';
 import PrettyError from 'pretty-error';
+import unlimited from 'unlimited';
+import downgrade from 'downgrade';
+import url from 'url';
+import twilio from 'twilio';
+import compress from 'compression';
 import passport from './core/passport';
 import models from './data/models';
 import schema from './data/schema';
 import routes from './routes';
 import assets from './assets'; // eslint-disable-line import/no-unresolved
-import { port, auth, analytics } from './config';
+import {
+  port,
+  auth,
+  analytics,
+  twilio as twilioConfig,
+  CORS_WHITELIST
+} from './config';
 
 const app = express();
 
@@ -35,12 +47,106 @@ global.navigator = global.navigator || {};
 global.navigator.userAgent = global.navigator.userAgent || 'all';
 
 //
+// Upgrade the maximum file descriptor number (`'nofile'`) that can be opened
+// by this process
+// -----------------------------------------------------------------------------
+unlimited();
+
+//
+// Node.js compression middleware
+// -----------------------------------------------------------------------------
+app.use(compress());
+
+//
 // Register Node.js middleware
 // -----------------------------------------------------------------------------
 app.use(express.static(path.join(__dirname, 'public')));
 app.use(cookieParser());
 app.use(bodyParser.urlencoded({ extended: true }));
 app.use(bodyParser.json());
+
+//
+// Custom header
+// -----------------------------------------------------------------------------
+app.use((req, res, next) => { // eslint-disable-line no-unused-vars
+  // Use HTTP Strict Transport Security
+  // Lasts 1 year, incl. subdomains, allow browser preload list
+  if (process.env.NODE_ENV === 'production') {
+    res.header(
+      'Strict-Transport-Security',
+      'max-age=31536000; includeSubDomains; preload'
+    );
+  }
+
+  // Add cross-domain header for fonts, required by spec, Firefox, and IE.
+  var extname = path.extname(url.parse(req.url).pathname);
+  if (['.eot', '.ttf', '.otf', '.woff', '.woff2'].indexOf(extname) >= 0) {
+    res.header('Access-Control-Allow-Origin', '*');
+  }
+
+  // Prevents IE and Chrome from MIME-sniffing a response. Reduces exposure to
+  // drive-by download attacks on sites serving user uploaded content.
+  res.header('X-Content-Type-Options', 'nosniff');
+
+  // Prevent rendering of site within a frame.
+  res.header('X-Frame-Options', 'DENY');
+
+  // Enable the XSS filter built into most recent web browsers. It's usually
+  // enabled by default anyway, so role of this headers is to re-enable for this
+  // particular website if it was disabled by the user.
+  res.header('X-XSS-Protection', '1; mode=block');
+
+  // Force IE to use latest rendering engine or Chrome Frame
+  res.header('X-UA-Compatible', 'IE=Edge,chrome=1');
+
+  next();
+});
+
+//
+// Fetch new ice_servers from twilio token regularly
+// -----------------------------------------------------------------------------
+var iceServers;
+var twilioClient;
+try {
+  twilioClient = twilio(twilioConfig.accountSid, twilioConfig.authToken);
+} catch (err) {}
+
+function updateIceServers() {
+  twilioClient.tokens.create({}, (err, token) => {
+    if (err) {
+      return error(err);
+    }
+
+    /* jscs:disable requireCamelCaseOrUpperCaseIdentifiers */
+    if (!token.ice_servers) {
+      /* jscs:enable requireCamelCaseOrUpperCaseIdentifiers */
+      return error(new Error('twilio response ' + token + ' missing ice_servers'));
+    }
+
+    /* jscs:disable requireCamelCaseOrUpperCaseIdentifiers */
+    iceServers = token.ice_servers.filter(function(server) {
+      /* jscs:enable requireCamelCaseOrUpperCaseIdentifiers */
+      var urls = server.urls || server.url;
+      return urls && !/^stun:/.test(urls);
+    });
+    iceServers.unshift({
+      url: 'stun:23.21.150.121',
+    });
+
+    // Support new spec (`RTCIceServer.url` was renamed to `RTCIceServer.urls`)
+    iceServers = iceServers.map(function(server) {
+      if (server.urls === undefined) {
+        server.urls = server.url;
+      }
+      return server;
+    });
+  });
+}
+
+if (twilioClient) {
+  setInterval(updateIceServers, twilioConfig.UPDATE_TIME_PERIORD).unref();
+  updateIceServers();
+}
 
 //
 // Authentication
@@ -76,6 +182,28 @@ app.use('/graphql', expressGraphQL(req => ({
   rootValue: { request: req },
   pretty: process.env.NODE_ENV !== 'production',
 })));
+
+//
+// Register rtcConfig route
+// -----------------------------------------------------------------------------
+app.get('/rtcConfig', cors({
+  origin: (origin, cb) => {
+    var allowed = CORS_WHITELIST.indexOf(origin) >= 0 ||
+      /https?:\/\/localhost(:|$)/.test(origin) ||
+      /https?:\/\/[^.\/]+\.localtunnel\.me$/.test(origin);
+    cb(null, allowed);
+  },
+}), (req, res) => {
+  if (!iceServers) {
+    res.status(404).send({
+      iceServers: [],
+    });
+  } else {
+    res.send({
+      iceServers: iceServers,
+    });
+  }
+});
 
 //
 // Register server-side rendering middleware
@@ -142,6 +270,8 @@ app.use((err, req, res, next) => { // eslint-disable-line no-unused-vars
 models.sync().catch(err => console.error(err.stack)).then(() => {
   app.listen(port, () => {
     console.log(`The server is running at http://localhost:${port}/`);
+
+    downgrade();
   });
 });
 /* eslint-enable no-console */
